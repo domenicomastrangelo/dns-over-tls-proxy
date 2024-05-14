@@ -52,7 +52,11 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	cache := cache.GetCache(ctx)
 
 	// Hash the DNS query to use as the cache key
-	cacheKey := getCacheKeyFromQuestionSlice(msg.Question, *logger)
+	cacheKey, err := getCacheKeyFromQuestionSlice(msg.Question, *logger)
+	if err != nil {
+		// Log the error and continue without caching
+		logger.Error(fmt.Sprintf("Error hashing DNS query: %v", err))
+	}
 
 	// Encode cacheKey to base64
 	cacheKey = base64.StdEncoding.EncodeToString([]byte(cacheKey))
@@ -124,12 +128,12 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	return respBuf[:n], nil
 }
 
-func getCacheKeyFromQuestionSlice(questions []dns.Question, logger slog.Logger) string {
+func getCacheKeyFromQuestionSlice(questions []dns.Question, logger slog.Logger) (string, error) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	err := enc.Encode(questions)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error encoding DNS question: %v", err))
+		return "", err
 	}
 
 	questionBytes := buf.Bytes()
@@ -138,7 +142,7 @@ func getCacheKeyFromQuestionSlice(questions []dns.Question, logger slog.Logger) 
 	hasher.Write(questionBytes)
 	hash := hasher.Sum(nil)
 
-	return string(hash)
+	return string(hash), nil
 }
 
 func getCertificatePool(logger *slog.Logger) (*x509.CertPool, error) {
