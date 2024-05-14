@@ -10,15 +10,14 @@ import (
 	"dns-over-tls-proxy/internal/proxy"
 )
 
-var (
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
 		Level:     slog.LevelInfo,
 	}))
-	ctx, cancel = context.WithCancel(context.Background())
-)
 
-func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Create a channel to listen for OS signals
 	signalChan := make(chan os.Signal, 2)
 	defer close(signalChan)
