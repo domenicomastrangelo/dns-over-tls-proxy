@@ -10,7 +10,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func StartTCPDNSServer(ch chan bool, ctx context.Context, logger *slog.Logger) error {
+func StartTCPDNSServer(ctx context.Context, logger *slog.Logger) error {
 	// Listen for incoming TCP DNS connections on port 53
 	listener, err := net.Listen("tcp", "0.0.0.0:53")
 	if err != nil {
@@ -25,7 +25,6 @@ func StartTCPDNSServer(ch chan bool, ctx context.Context, logger *slog.Logger) e
 		select {
 		case <-ctx.Done():
 			logger.Info("Shutting down TCP DNS server")
-			ch <- true
 			return nil
 		default:
 			conn, err := listener.Accept()

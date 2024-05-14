@@ -9,7 +9,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func StartUDPDNSServer(ch chan bool, ctx context.Context, logger *slog.Logger) error {
+func StartUDPDNSServer(ctx context.Context, logger *slog.Logger) error {
 	// Listen for incoming UDP DNS connections on port 53
 	listener, err := net.ListenPacket("udp", "0.0.0.0:53")
 	if err != nil {
@@ -25,7 +25,6 @@ func StartUDPDNSServer(ch chan bool, ctx context.Context, logger *slog.Logger) e
 		select {
 		case <-ctx.Done():
 			logger.Info("Shutting down UDP DNS server")
-			ch <- true
 			return nil
 		default:
 			maxBytesPerUDPRequest := 4096

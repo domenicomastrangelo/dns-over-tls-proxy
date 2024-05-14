@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"dns-over-tls-proxy/internal/proxy"
 )
@@ -13,18 +15,23 @@ var (
 		AddSource: true,
 		Level:     slog.LevelInfo,
 	}))
-	ctx = context.Background()
+	ctx, cancel = context.WithCancel(context.Background())
 )
 
 func main() {
-	// Listen for incoming TCP DNS connections on port 53
-	ch := make(chan bool)
-	defer close(ch)
+	// Create a channel to listen for OS signals
+	signalChan := make(chan os.Signal, 2)
+	defer close(signalChan)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	go proxy.StartTCPDNSServer(ch, ctx, logger)
+	// Listen for incoming TCP DNS connections on port 53
+	go proxy.StartTCPDNSServer(ctx, logger)
 
 	// Listen for incoming UDP DNS connections on port 53
-	go proxy.StartUDPDNSServer(ch, ctx, logger)
+	go proxy.StartUDPDNSServer(ctx, logger)
 
-	<-ch
+	// Wait for an OS signal to shutdown the server
+	<-signalChan
+	logger.Info("Shutting down DNS-over-TLS proxy server")
+	cancel()
 }
