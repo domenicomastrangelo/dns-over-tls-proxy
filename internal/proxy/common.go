@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"dns-over-tls-proxy/internal/cache"
@@ -23,8 +26,16 @@ const (
 
 // Forward the DNS query to the upstream DNS-over-TLS server using a new connection
 func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]byte, error) {
+	certs, err := getCertificatePool(logger)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error getting certificate pool: %v", err))
+		return nil, err
+	}
+
 	tlsConn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", DNSOverTLSHost, DNSOverTLSPort), &tls.Config{
-		InsecureSkipVerify: true,
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
+		RootCAs:    certs,
 	})
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error connecting to %s:%s: %v", DNSOverTLSHost, DNSOverTLSPort, err))
@@ -42,6 +53,9 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 
 	// Hash the DNS query to use as the cache key
 	cacheKey := getCacheKeyFromQuestionSlice(msg.Question, *logger)
+
+	// Encode cacheKey to base64
+	cacheKey = base64.StdEncoding.EncodeToString([]byte(cacheKey))
 
 	if res := cache.Get(ctx, cacheKey); res.Err() == nil {
 		logger.Info(fmt.Sprintf("Cache hit for query: %s", string(tlsMsg.Question[0].String())))
@@ -103,7 +117,7 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	}
 
 	// Cache the response
-	if res := cache.Set(ctx, string(tlsMsg.Question[0].String()), string(respBuf), 30*time.Minute); res.Err() != nil {
+	if res := cache.Set(ctx, cacheKey, string(respBuf), 30*time.Minute); res.Err() != nil {
 		logger.Error(fmt.Sprintf("Error caching response: %v", res.Err().Error()))
 	}
 
@@ -118,17 +132,25 @@ func getCacheKeyFromQuestionSlice(questions []dns.Question, logger slog.Logger) 
 		logger.Error(fmt.Sprintf("Error encoding DNS question: %v", err))
 	}
 
-	// Get the byte slice from the buffer
 	questionBytes := buf.Bytes()
 
-	// Create a new SHA-256 hasher
 	hasher := sha256.New()
-
-	// Write the byte slice to the hasher
 	hasher.Write(questionBytes)
-
-	// Compute the final hash
 	hash := hasher.Sum(nil)
 
 	return string(hash)
+}
+
+func getCertificatePool(logger *slog.Logger) (*x509.CertPool, error) {
+	certs := x509.NewCertPool()
+
+	certContents, err := os.ReadFile("cloudflare.cert")
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error reading certificate file: %v", err))
+		return nil, err
+	}
+
+	certs.AppendCertsFromPEM(certContents)
+
+	return certs, nil
 }
