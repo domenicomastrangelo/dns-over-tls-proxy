@@ -13,7 +13,7 @@ func StartUDPDNSServer(ctx context.Context, logger *slog.Logger) error {
 	// Listen for incoming UDP DNS connections on port 53
 	listener, err := net.ListenPacket("udp", "0.0.0.0:53")
 	if err != nil {
-		logger.Error(fmt.Sprintf("Error starting UDP DNS server: %v", err))
+		logger.Error("Error starting UDP DNS server", "error", err.Error())
 		return err
 	}
 
@@ -31,7 +31,7 @@ func StartUDPDNSServer(ctx context.Context, logger *slog.Logger) error {
 			buf := make([]byte, maxBytesPerUDPRequest)
 			n, addr, err := listener.ReadFrom(buf)
 			if err != nil {
-				logger.Error(fmt.Sprintf("Error reading from connection: %v", err))
+				logger.Error("Error reading from connection", "error", err.Error())
 				continue
 			}
 
@@ -41,13 +41,11 @@ func StartUDPDNSServer(ctx context.Context, logger *slog.Logger) error {
 }
 
 func handleUDPConnection(ctx context.Context, listener net.PacketConn, buf []byte, addr net.Addr, logger *slog.Logger) {
-	logger.Info(fmt.Sprintf("Received UDP connection from %s", addr))
-
 	// Parse the DNS query
 	msg := dns.Msg{}
 
 	if err := msg.Unpack(buf); err != nil {
-		logger.Error(fmt.Sprintf("Error unpacking DNS query: %v", err))
+		logger.Error("Error unpacking DNS query", "error", err.Error())
 		return
 	}
 
@@ -56,13 +54,16 @@ func handleUDPConnection(ctx context.Context, listener net.PacketConn, buf []byt
 		resp []byte
 		err  error
 	)
+
 	if resp, err = forwardDNSQuery(ctx, logger, &msg); err != nil {
-		logger.Error(fmt.Sprintf("Error forwarding DNS query: %v", err))
+		logger.Error("Error forwarding DNS query", "error", err.Error())
+		return
 	}
 
 	// Send the DNS response back to the client
 	if _, err := listener.WriteTo(resp, addr); err != nil {
-		logger.Error(fmt.Sprintf("Error writing to connection: %v", err))
+		logger.Error("Error writing to connection", "error", err.Error())
+		return
 	}
 
 	logger.Info(fmt.Sprintf("Sent DNS response to %s", addr))
