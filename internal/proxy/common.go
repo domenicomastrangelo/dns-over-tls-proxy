@@ -18,6 +18,7 @@ import (
 	"dns-over-tls-proxy/internal/cache"
 
 	"github.com/miekg/dns"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -27,37 +28,13 @@ const (
 
 // Forward the DNS query to the upstream DNS-over-TLS server using a new connection
 func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]byte, error) {
-	certs, err := getCertificatePool()
+	tlsConn, conn, err := createTLSMessage(ctx, logger)
 	if err != nil {
-		logger.Error("Error getting certificate pool", "error", err.Error())
-		return nil, err
-	}
+		logger.Error("Error creating DNS-over-TLS message", "error", err.Error())
 
-	dialer := &net.Dialer{
-		Timeout: 5 * time.Second,
-	}
-	conn, err := dialer.DialContext(
-		ctx,
-		"tcp",
-		fmt.Sprintf("%s:%s", DNSOverTLSHost, DNSOverTLSPort),
-	)
-	if err != nil {
-		logger.Error(
-			fmt.Sprintf("Error connecting to %s:%s", DNSOverTLSHost, DNSOverTLSPort),
-			"error",
-			err,
-		)
 		return nil, err
 	}
 	defer conn.Close()
-
-	tlsConn := tls.Client(conn, &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		MaxVersion: tls.VersionTLS13,
-		RootCAs:    certs,
-		ServerName: DNSOverTLSHost,
-	})
-
 	defer tlsConn.Close()
 
 	tlsMsg := &dns.Msg{}
@@ -74,31 +51,18 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 		logger.Error("Error hashing DNS query", "error", err.Error())
 	}
 
-	// Encode cacheKey to base64
-	cacheKey = base64.StdEncoding.EncodeToString([]byte(cacheKey))
+	cachedMessage, err := getCachedMessage(ctx, logger, cache, cacheKey, msg, tlsMsg)
+	if err != nil {
+		logger.Error("Error getting cached message", "error", err.Error())
 
-	if res := cache.Get(ctx, cacheKey); res.Err() == nil {
-		logger.Info(fmt.Sprintf("Cache hit for query: %s", string(tlsMsg.Question[0].String())))
-
-		// Setting the current request ID
-		unpackedMsg := dns.Msg{}
-		if err = unpackedMsg.Unpack([]byte(res.Val())); err != nil {
-			logger.Error("Error unpacking DNS query", "error", err.Error())
-			return nil, err
-		}
-		unpackedMsg.Id = msg.Id
-
-		var resp []byte
-		resp, err = unpackedMsg.Pack()
-		if err != nil {
-			logger.Error("Error packing DNS response", "error", err.Error())
-			return nil, err
-		}
-
-		return resp, nil
+		return nil, err
 	}
 
-	// Setting the current request ID here if cache miss
+	if cachedMessage != nil {
+		return cachedMessage, nil
+	}
+
+	// We need to set the id here as it would be the same for the cache and for the new result
 	tlsMsg.Id = msg.Id
 
 	query, err := tlsMsg.Pack()
@@ -108,8 +72,8 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	}
 
 	// DNS-over-TLS requires a 2-byte length prefix
-	queryLength := make([]byte, 2)
-	binary.BigEndian.PutUint16(queryLength, uint16(len(query)))
+	tlsRequestPrefix := make([]byte, 2)
+	binary.BigEndian.PutUint16(tlsRequestPrefix, uint16(len(query)))
 
 	errChan := make(chan error, 1)
 	defer close(errChan)
@@ -117,37 +81,7 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	resChan := make(chan []byte, 1)
 	defer close(resChan)
 
-	go func() {
-		if _, err = tlsConn.Write(queryLength); err != nil {
-			errChan <- err
-			return
-		}
-
-		// Send the DNS query to the upstream DNS-over-TLS server
-		if _, err = tlsConn.Write(query); err != nil {
-			errChan <- err
-			return
-		}
-
-		// Read the DNS response from the upstream DNS-over-TLS server
-
-		// Read the 2-byte length prefix first
-		respLength := make([]byte, 2)
-		if _, err = tlsConn.Read(respLength); err != nil {
-			errChan <- err
-			return
-		}
-		length := binary.BigEndian.Uint16(respLength)
-
-		respBuf := make([]byte, length)
-		_, err := tlsConn.Read(respBuf)
-		if err != nil {
-			errChan <- err
-			return
-		}
-
-		resChan <- respBuf
-	}()
+	go writeToDNSoverTLSServer(errChan, resChan, tlsConn, tlsRequestPrefix, query)
 
 	select {
 	case <-ctx.Done():
@@ -179,7 +113,10 @@ func getCacheKeyFromQuestionSlice(questions []dns.Question) (string, error) {
 	hasher.Write(questionBytes)
 	hash := hasher.Sum(nil)
 
-	return string(hash), nil
+	// Encode cacheKey to base64
+	cacheKey := base64.StdEncoding.EncodeToString(hash)
+
+	return cacheKey, nil
 }
 
 func getCertificatePool() (*x509.CertPool, error) {
@@ -193,4 +130,95 @@ func getCertificatePool() (*x509.CertPool, error) {
 	certs.AppendCertsFromPEM(certContents)
 
 	return certs, nil
+}
+
+func createTLSMessage(ctx context.Context, logger *slog.Logger) (*tls.Conn, net.Conn, error) {
+	certs, err := getCertificatePool()
+	if err != nil {
+		logger.Error("Error getting certificate pool", "error", err.Error())
+		return nil, nil, err
+	}
+
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+	}
+	conn, err := dialer.DialContext(
+		ctx,
+		"tcp",
+		fmt.Sprintf("%s:%s", DNSOverTLSHost, DNSOverTLSPort),
+	)
+	if err != nil {
+		logger.Error(
+			fmt.Sprintf("Error connecting to %s:%s", DNSOverTLSHost, DNSOverTLSPort),
+			"error",
+			err,
+		)
+		return nil, nil, err
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
+		RootCAs:    certs,
+		ServerName: DNSOverTLSHost,
+	})
+
+	return tlsConn, conn, nil
+}
+
+func getCachedMessage(ctx context.Context, logger *slog.Logger, cache *redis.Client, cacheKey string, prevMsg *dns.Msg, tlsMsg *dns.Msg) ([]byte, error) {
+	if res := cache.Get(ctx, cacheKey); res.Err() == nil {
+		logger.Info(fmt.Sprintf("Cache hit for query: %s", string(tlsMsg.Question[0].String())))
+
+		// Setting the current request ID
+		unpackedMsg := dns.Msg{}
+		if err := unpackedMsg.Unpack([]byte(res.Val())); err != nil {
+			logger.Error("Error unpacking DNS query", "error", err.Error())
+			return nil, err
+		}
+		unpackedMsg.Id = prevMsg.Id
+
+		var resp []byte
+		resp, err := unpackedMsg.Pack()
+		if err != nil {
+			logger.Error("Error packing DNS response", "error", err.Error())
+			return nil, err
+		}
+
+		return resp, nil
+	}
+
+	return nil, nil
+}
+
+func writeToDNSoverTLSServer(errChan chan error, resChan chan []byte, tlsConn *tls.Conn, tlsRequestPrefix []byte, query []byte) {
+	if _, err := (*tlsConn).Write(tlsRequestPrefix); err != nil {
+		errChan <- err
+		return
+	}
+
+	// Send the DNS query to the upstream DNS-over-TLS server
+	if _, err := (*tlsConn).Write(query); err != nil {
+		errChan <- err
+		return
+	}
+
+	// Read the DNS response from the upstream DNS-over-TLS server
+
+	// Read the 2-byte length prefix first
+	respLength := make([]byte, 2)
+	if _, err := (*tlsConn).Read(respLength); err != nil {
+		errChan <- err
+		return
+	}
+	length := binary.BigEndian.Uint16(respLength)
+
+	respBuf := make([]byte, length)
+	_, err := (*tlsConn).Read(respBuf)
+	if err != nil {
+		errChan <- err
+		return
+	}
+
+	resChan <- respBuf
 }
