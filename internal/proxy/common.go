@@ -81,7 +81,7 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	resChan := make(chan []byte, 1)
 	defer close(resChan)
 
-	go writeToDNSoverTLSServer(errChan, resChan, tlsConn, tlsRequestPrefix, query)
+	go writeToDNSoverTLSServer(ctx, errChan, resChan, tlsConn, tlsRequestPrefix, query)
 
 	select {
 	case <-ctx.Done():
@@ -191,34 +191,45 @@ func getCachedMessage(ctx context.Context, logger *slog.Logger, cache *redis.Cli
 	return nil, nil
 }
 
-func writeToDNSoverTLSServer(errChan chan error, resChan chan []byte, tlsConn *tls.Conn, tlsRequestPrefix []byte, query []byte) {
-	if _, err := (*tlsConn).Write(tlsRequestPrefix); err != nil {
-		errChan <- err
-		return
+func writeToDNSoverTLSServer(ctx context.Context, errChan chan error, resChan chan []byte, tlsConn *tls.Conn, tlsRequestPrefix []byte, query []byte) {
+	doneChan := make(chan struct{})
+
+	go func() {
+		defer close(doneChan)
+		if _, err := (*tlsConn).Write(tlsRequestPrefix); err != nil {
+			errChan <- err
+			return
+		}
+
+		// Send the DNS query to the upstream DNS-over-TLS server
+		if _, err := (*tlsConn).Write(query); err != nil {
+			errChan <- err
+			return
+		}
+
+		// Read the DNS response from the upstream DNS-over-TLS server
+
+		// Read the 2-byte length prefix first
+		respLength := make([]byte, 2)
+		if _, err := (*tlsConn).Read(respLength); err != nil {
+			errChan <- err
+			return
+		}
+		length := binary.BigEndian.Uint16(respLength)
+
+		respBuf := make([]byte, length)
+		_, err := (*tlsConn).Read(respBuf)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		resChan <- respBuf
+	}()
+
+	select {
+	case <-ctx.Done():
+		errChan <- ctx.Err()
+	case <-doneChan:
 	}
-
-	// Send the DNS query to the upstream DNS-over-TLS server
-	if _, err := (*tlsConn).Write(query); err != nil {
-		errChan <- err
-		return
-	}
-
-	// Read the DNS response from the upstream DNS-over-TLS server
-
-	// Read the 2-byte length prefix first
-	respLength := make([]byte, 2)
-	if _, err := (*tlsConn).Read(respLength); err != nil {
-		errChan <- err
-		return
-	}
-	length := binary.BigEndian.Uint16(respLength)
-
-	respBuf := make([]byte, length)
-	_, err := (*tlsConn).Read(respBuf)
-	if err != nil {
-		errChan <- err
-		return
-	}
-
-	resChan <- respBuf
 }
