@@ -4,6 +4,14 @@ services:
     ports:
       - "53:53/udp"
       - "53:53/tcp"
+    environment:
+      - DNS_OVER_TLS_PORT=853
+      - DNS_OVER_TLS_HOST=1.1.1.1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DNS_OVER_TLS_CERT_PATH=/cloudflare.cert
+    volumes:
+      - ./cloudflare.cert:/cloudflare.cert
     depends_on:
       - redis
   redis:

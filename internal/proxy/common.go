@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,27 +9,20 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"time"
 
-	"dns-over-tls-proxy/internal/cache"
+	"dns-over-tls-proxy/internal/config"
 
 	"github.com/miekg/dns"
-	"github.com/redis/go-redis/v9"
-)
-
-const (
-	DNSOverTLSPort = "853"
-	DNSOverTLSHost = "1.1.1.1"
 )
 
 // Forward the DNS query to the upstream DNS-over-TLS server using a new connection
-func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]byte, error) {
-	tlsConn, conn, err := createTLSMessage(ctx, logger)
+func forwardDNSQuery(config config.Config, msg *dns.Msg) ([]byte, error) {
+	tlsConn, conn, err := createTLSMessage(config)
 	if err != nil {
-		logger.Error("Error creating DNS-over-TLS message", "error", err.Error())
+		config.Logger.Error("Error creating DNS-over-TLS message", "error", err.Error())
 
 		return nil, err
 	}
@@ -41,19 +33,16 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	tlsMsg.Question = append(tlsMsg.Question, msg.Question...)
 	tlsMsg.RecursionDesired = true
 
-	// If the query is in the cache, return the cached response
-	cache := cache.GetCache(ctx)
-
 	// Hash the DNS query to use as the cache key
 	cacheKey, err := getCacheKeyFromQuestionSlice(msg.Question)
 	if err != nil {
 		// Log the error and continue without caching
-		logger.Error("Error hashing DNS query", "error", err.Error())
+		config.Logger.Error("Error hashing DNS query", "error", err.Error())
 	}
 
-	cachedMessage, err := getCachedMessage(ctx, logger, cache, cacheKey, msg, tlsMsg)
+	cachedMessage, err := getCachedMessage(config, cacheKey, msg, tlsMsg)
 	if err != nil {
-		logger.Error("Error getting cached message", "error", err.Error())
+		config.Logger.Error("Error getting cached message", "error", err.Error())
 
 		return nil, err
 	}
@@ -67,7 +56,7 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 
 	query, err := tlsMsg.Pack()
 	if err != nil {
-		logger.Error("Error packing DNS query", "error", err.Error())
+		config.Logger.Error("Error packing DNS query", "error", err.Error())
 		return nil, err
 	}
 
@@ -81,19 +70,19 @@ func forwardDNSQuery(ctx context.Context, logger *slog.Logger, msg *dns.Msg) ([]
 	resChan := make(chan []byte, 1)
 	defer close(resChan)
 
-	go writeToDNSoverTLSServer(ctx, errChan, resChan, tlsConn, tlsRequestPrefix, query)
+	go writeToDNSoverTLSServer(config, errChan, resChan, tlsConn, tlsRequestPrefix, query)
 
 	select {
-	case <-ctx.Done():
-		logger.Info("Context was cancelled. Killing request")
-		return nil, ctx.Err()
+	case <-config.Ctx.Done():
+		config.Logger.Info("Context was cancelled. Killing request")
+		return nil, config.Ctx.Err()
 	case err := <-errChan:
-		logger.Error("Error during connection to the dns-over-tls server", "error", err.Error())
+		config.Logger.Error("Error during connection to the dns-over-tls server", "error", err.Error())
 		return nil, err
 	case respBuf := <-resChan:
 		// Cache the response
-		if res := cache.Set(ctx, cacheKey, string(respBuf), 30*time.Minute); res.Err() != nil {
-			logger.Error("Error caching response", "error", res.Err().Error())
+		if res := config.Cache.Set(config.Ctx, cacheKey, string(respBuf), 30*time.Minute); res.Err() != nil {
+			config.Logger.Error("Error caching response", "error", res.Err().Error())
 		}
 		return respBuf, nil
 	}
@@ -119,10 +108,10 @@ func getCacheKeyFromQuestionSlice(questions []dns.Question) (string, error) {
 	return cacheKey, nil
 }
 
-func getCertificatePool() (*x509.CertPool, error) {
+func getCertificatePool(config config.Config) (*x509.CertPool, error) {
 	certs := x509.NewCertPool()
 
-	certContents, err := os.ReadFile("cloudflare.cert")
+	certContents, err := os.ReadFile(config.DNSOverTLSCertPath)
 	if err != nil {
 		return nil, err
 	}
@@ -132,10 +121,10 @@ func getCertificatePool() (*x509.CertPool, error) {
 	return certs, nil
 }
 
-func createTLSMessage(ctx context.Context, logger *slog.Logger) (*tls.Conn, net.Conn, error) {
-	certs, err := getCertificatePool()
+func createTLSMessage(config config.Config) (*tls.Conn, net.Conn, error) {
+	certs, err := getCertificatePool(config)
 	if err != nil {
-		logger.Error("Error getting certificate pool", "error", err.Error())
+		config.Logger.Error("Error getting certificate pool", "error", err.Error())
 		return nil, nil, err
 	}
 
@@ -143,13 +132,13 @@ func createTLSMessage(ctx context.Context, logger *slog.Logger) (*tls.Conn, net.
 		Timeout: 5 * time.Second,
 	}
 	conn, err := dialer.DialContext(
-		ctx,
+		config.Ctx,
 		"tcp",
-		fmt.Sprintf("%s:%s", DNSOverTLSHost, DNSOverTLSPort),
+		fmt.Sprintf("%s:%s", config.DNSOverTLSHost, config.DNSOverTLSPort),
 	)
 	if err != nil {
-		logger.Error(
-			fmt.Sprintf("Error connecting to %s:%s", DNSOverTLSHost, DNSOverTLSPort),
+		config.Logger.Error(
+			fmt.Sprintf("Error connecting to %s:%s", config.DNSOverTLSHost, config.DNSOverTLSPort),
 			"error",
 			err,
 		)
@@ -160,20 +149,20 @@ func createTLSMessage(ctx context.Context, logger *slog.Logger) (*tls.Conn, net.
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
 		RootCAs:    certs,
-		ServerName: DNSOverTLSHost,
+		ServerName: config.DNSOverTLSHost,
 	})
 
 	return tlsConn, conn, nil
 }
 
-func getCachedMessage(ctx context.Context, logger *slog.Logger, cache *redis.Client, cacheKey string, prevMsg *dns.Msg, tlsMsg *dns.Msg) ([]byte, error) {
-	if res := cache.Get(ctx, cacheKey); res.Err() == nil {
-		logger.Info(fmt.Sprintf("Cache hit for query: %s", string(tlsMsg.Question[0].String())))
+func getCachedMessage(config config.Config, cacheKey string, prevMsg *dns.Msg, tlsMsg *dns.Msg) ([]byte, error) {
+	if res := config.Cache.Get(config.Ctx, cacheKey); res.Err() == nil {
+		config.Logger.Info(fmt.Sprintf("Cache hit for query: %s", string(tlsMsg.Question[0].String())))
 
 		// Setting the current request ID
 		unpackedMsg := dns.Msg{}
 		if err := unpackedMsg.Unpack([]byte(res.Val())); err != nil {
-			logger.Error("Error unpacking DNS query", "error", err.Error())
+			config.Logger.Error("Error unpacking DNS query", "error", err.Error())
 			return nil, err
 		}
 		unpackedMsg.Id = prevMsg.Id
@@ -181,7 +170,7 @@ func getCachedMessage(ctx context.Context, logger *slog.Logger, cache *redis.Cli
 		var resp []byte
 		resp, err := unpackedMsg.Pack()
 		if err != nil {
-			logger.Error("Error packing DNS response", "error", err.Error())
+			config.Logger.Error("Error packing DNS response", "error", err.Error())
 			return nil, err
 		}
 
@@ -191,7 +180,7 @@ func getCachedMessage(ctx context.Context, logger *slog.Logger, cache *redis.Cli
 	return nil, nil
 }
 
-func writeToDNSoverTLSServer(ctx context.Context, errChan chan error, resChan chan []byte, tlsConn *tls.Conn, tlsRequestPrefix []byte, query []byte) {
+func writeToDNSoverTLSServer(config config.Config, errChan chan error, resChan chan []byte, tlsConn *tls.Conn, tlsRequestPrefix []byte, query []byte) {
 	doneChan := make(chan struct{})
 
 	go func() {
@@ -228,8 +217,8 @@ func writeToDNSoverTLSServer(ctx context.Context, errChan chan error, resChan ch
 	}()
 
 	select {
-	case <-ctx.Done():
-		errChan <- ctx.Err()
+	case <-config.Ctx.Done():
+		errChan <- config.Ctx.Err()
 	case <-doneChan:
 	}
 }

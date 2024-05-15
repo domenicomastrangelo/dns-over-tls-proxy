@@ -1,51 +1,51 @@
 package proxy
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
 	"net"
+
+	"dns-over-tls-proxy/internal/config"
 
 	"github.com/miekg/dns"
 )
 
-func StartUDPDNSServer(ctx context.Context, logger *slog.Logger) error {
+func StartUDPDNSServer(config config.Config) error {
 	// Listen for incoming UDP DNS connections on port 53
 	listener, err := net.ListenPacket("udp", "0.0.0.0:53")
 	if err != nil {
-		logger.Error("Error starting UDP DNS server", "error", err.Error())
+		config.Logger.Error("Error starting UDP DNS server", "error", err.Error())
 		return err
 	}
 
 	defer listener.Close()
 
-	logger.Info("UDP DNS server started on port 53")
+	config.Logger.Info("UDP DNS server started on port 53")
 
 	for {
 		select {
-		case <-ctx.Done():
-			logger.Info("Shutting down UDP DNS server")
+		case <-config.Ctx.Done():
+			config.Logger.Info("Shutting down UDP DNS server")
 			return nil
 		default:
 			maxBytesPerUDPRequest := 4096
 			buf := make([]byte, maxBytesPerUDPRequest)
 			n, addr, err := listener.ReadFrom(buf)
 			if err != nil {
-				logger.Error("Error reading from connection", "error", err.Error())
+				config.Logger.Error("Error reading from connection", "error", err.Error())
 				continue
 			}
 
-			go handleUDPConnection(ctx, listener, buf[:n], addr, logger)
+			go handleUDPConnection(config, listener, buf[:n], addr)
 		}
 	}
 }
 
-func handleUDPConnection(ctx context.Context, listener net.PacketConn, buf []byte, addr net.Addr, logger *slog.Logger) {
+func handleUDPConnection(config config.Config, listener net.PacketConn, buf []byte, addr net.Addr) {
 	// Parse the DNS query
 	msg := dns.Msg{}
 
 	if err := msg.Unpack(buf); err != nil {
-		logger.Error("Error unpacking DNS query", "error", err.Error())
+		config.Logger.Error("Error unpacking DNS query", "error", err.Error())
 		return
 	}
 
@@ -55,16 +55,16 @@ func handleUDPConnection(ctx context.Context, listener net.PacketConn, buf []byt
 		err  error
 	)
 
-	if resp, err = forwardDNSQuery(ctx, logger, &msg); err != nil {
-		logger.Error("Error forwarding DNS query", "error", err.Error())
+	if resp, err = forwardDNSQuery(config, &msg); err != nil {
+		config.Logger.Error("Error forwarding DNS query", "error", err.Error())
 		return
 	}
 
 	// Send the DNS response back to the client
 	if _, err := listener.WriteTo(resp, addr); err != nil {
-		logger.Error("Error writing to connection", "error", err.Error())
+		config.Logger.Error("Error writing to connection", "error", err.Error())
 		return
 	}
 
-	logger.Info(fmt.Sprintf("Sent DNS response to %s", addr))
+	config.Logger.Info(fmt.Sprintf("Sent DNS response to %s", addr))
 }

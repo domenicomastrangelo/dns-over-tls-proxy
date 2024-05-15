@@ -1,17 +1,19 @@
 package cache
 
 import (
-	"context"
+	"fmt"
+
+	"dns-over-tls-proxy/internal/config"
 
 	"github.com/redis/go-redis/v9"
 )
 
 var Cache *redis.Client
 
-func GetCache(ctx context.Context) *redis.Client {
-	if Cache == nil || Cache.Ping(ctx).Err() != nil {
+func GetCache(config config.Config) *redis.Client {
+	if Cache == nil || Cache.Ping(config.Ctx).Err() != nil {
 		Cache = redis.NewClient(&redis.Options{
-			Addr:     "redis:6379",
+			Addr:     fmt.Sprintf("%s:%s", config.RedisHost, config.RedisPort),
 			Password: "",
 			DB:       0,
 		})

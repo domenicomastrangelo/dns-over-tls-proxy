@@ -11,6 +11,7 @@ This repository contains an implementation of a DNS-over-TLS proxy server that h
 - Supports concurrent processing of multiple incoming requests.
 - Caches DNS responses to reduce latency and improve performance.
 - Gracefully handles context cancellation and errors.
+- Builds configuration from environment variables.
 
 ## Implementation Details
 
@@ -21,6 +22,7 @@ This repository contains an implementation of a DNS-over-TLS proxy server that h
 - `internal/proxy/udp.go`: Contains the implementation for handling DNS queries over UDP.
 - `internal/proxy/common.go`: Contains shared utility functions for handling DNS queries and managing the cache.
 - `internal/cache`: A package that provides caching functionality using Redis.
+- `internal/config`: A package that provides config functionality for customizable settings.
 
 ### Key Components
 
@@ -79,8 +81,6 @@ The UDP DNS server listens for incoming UDP DNS connections on port 53, processe
 
 ## Future Improvements
 
-- **Configuration Management**:
-    - Externalize configuration to a file or environment variables to make the server more flexible and easier to deploy in different environments.
 - **Enhanced Logging**:
     - Implement more detailed and structured logging for better observability and monitoring.
 - **Security Enhancements**:
