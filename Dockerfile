@@ -4,7 +4,7 @@ COPY . .
 RUN go get -d -v ./...
 RUN CGO_ENABLED=0 go build -o /go/bin/dns-over-tls-proxy ./cmd
 
-FROM alpine:3.19.1
+FROM scratch
 COPY --from=builder /go/bin/dns-over-tls-proxy /go/bin/dns-over-tls-proxy
 
 EXPOSE 53
