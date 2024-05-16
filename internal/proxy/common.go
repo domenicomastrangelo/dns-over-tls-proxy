@@ -185,13 +185,13 @@ func writeToDNSoverTLSServer(config config.Config, errChan chan error, resChan c
 
 	go func() {
 		defer close(doneChan)
-		if _, err := (*tlsConn).Write(tlsRequestPrefix); err != nil {
+		if _, err := tlsConn.Write(tlsRequestPrefix); err != nil {
 			errChan <- err
 			return
 		}
 
 		// Send the DNS query to the upstream DNS-over-TLS server
-		if _, err := (*tlsConn).Write(query); err != nil {
+		if _, err := tlsConn.Write(query); err != nil {
 			errChan <- err
 			return
 		}
@@ -200,14 +200,14 @@ func writeToDNSoverTLSServer(config config.Config, errChan chan error, resChan c
 
 		// Read the 2-byte length prefix first
 		respLength := make([]byte, 2)
-		if _, err := (*tlsConn).Read(respLength); err != nil {
+		if _, err := tlsConn.Read(respLength); err != nil {
 			errChan <- err
 			return
 		}
 		length := binary.BigEndian.Uint16(respLength)
 
 		respBuf := make([]byte, length)
-		_, err := (*tlsConn).Read(respBuf)
+		_, err := tlsConn.Read(respBuf)
 		if err != nil {
 			errChan <- err
 			return
