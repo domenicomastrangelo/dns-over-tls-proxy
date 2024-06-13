@@ -40,14 +40,6 @@ The UDP DNS server listens for incoming UDP DNS connections on port 53, processe
 - **Cache Management**: Uses Redis to cache DNS query responses.
 - **DNS Message Handling**: Packs and unpacks DNS messages, and forwards DNS queries to the upstream server.
 
-## Installation
-
-1. Clone the repository:
-    ```sh
-    unzip dns-over-tls-proxy.zip
-    cd dns-over-tls-proxy
-    ```
-
 
 ## Usage
 
